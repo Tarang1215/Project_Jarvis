@@ -1,5 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from PIL import Image
 import time
 
@@ -29,62 +30,73 @@ def tool_log_diet(menu: str, amount: str, meal_type: str):
     """식단을 기록합니다."""
     res = diet.log_diet(db, menu, amount, meal_type)
     if res == "success": 
-        return "성공: 식단 DB에 저장됨"
+        return f"성공: {meal_type}에 '{menu}'({amount}) 저장 완료."
     return f"실패: {res}"
 
 def tool_log_workout(target_sheet: str, exercise: str, sets: str, weight: str, reps: str):
     """운동을 기록합니다."""
     res = workout.log_workout(db, target_sheet, exercise, sets, weight, reps)
     if res == "success": 
-        return "성공: 운동 DB에 저장됨"
+        return f"성공: {target_sheet} 운동 '{exercise}' 저장 완료."
     return f"실패: {res}"
 
 def tool_save_memory(fact: str):
     """기억을 저장합니다."""
     res = db.save_memory(fact)
     if res == "success": 
-        return "성공: 기억 DB에 저장됨"
+        return "성공: 기억 저장 완료."
     return f"실패: {res}"
 
 tools = [tool_log_diet, tool_log_workout, tool_save_memory]
 
-# 4. 모델 준비
+# 4. 모델 준비 (안전설정 해제 포함)
+# 음식 사진 등이 차단되지 않도록 안전 설정을 낮춥니다.
+safety_settings = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
+
 try:
     memory_context = db.load_memory()
     system_instruction = config.get_system_prompt(memory_context)
-    model = genai.GenerativeModel("gemini-2.5-flash", tools=tools, system_instruction=system_instruction)
+    # 모델에 안전 설정 적용
+    model = genai.GenerativeModel(
+        "gemini-2.5-flash", 
+        tools=tools, 
+        system_instruction=system_instruction,
+        safety_settings=safety_settings 
+    )
 except Exception as e:
     st.error(f"모델 로드 실패: {e}")
 
 # 5. 화면 구성
 st.title("Project Jarvis 👔")
 
-# 사이드바
 with st.sidebar:
     st.header("🎛️ 상태창")
-    if st.button("🔄 시스템 리셋"):
+    if st.button("🔄 대화 초기화"):
         st.session_state.messages = []
         st.rerun()
 
-# 채팅 기록 표시
 if "messages" not in st.session_state: st.session_state.messages = []
 
 for msg in st.session_state.messages:
-    if msg["role"] != "function": # 함수 처리 과정은 숨김
+    if msg["role"] != "function":
         with st.chat_message(msg["role"]):
             if "image" in msg: st.image(msg["image"], width=250)
             st.markdown(msg["content"])
 
-# 사진 업로드
 with st.popover("📸 사진 추가", use_container_width=True):
     uploaded_file = st.file_uploader("업로드", type=['jpg','png'])
 
 # ==========================================
-# 6. 메인 로직 (무응답 방지 버전)
+# 6. 메인 로직 (사진 처리 강화)
 # ==========================================
 if prompt := st.chat_input("지시를 내려주십시오."):
     
-    # 1. 사용자 메시지 표시
+    # 사용자 메시지 표시
     with st.chat_message("user"):
         if uploaded_file:
             img = Image.open(uploaded_file)
@@ -93,7 +105,6 @@ if prompt := st.chat_input("지시를 내려주십시오."):
         st.markdown(prompt)
         st.session_state.messages.append({"role":"user", "content":prompt})
 
-    # 2. AI 처리 시작
     try:
         # 히스토리 구성
         history = []
@@ -105,39 +116,39 @@ if prompt := st.chat_input("지시를 내려주십시오."):
             elif m["role"] == "model":
                 history.append({"role":"model", "parts":[m["content"]]})
         
-        # 현재 입력 구성
-        curr_parts = [prompt]
+        # [핵심] 현재 입력 구성 (사진 들어오면 강제 명령 추가)
+        curr_parts = []
+        
         if uploaded_file and not any("image" in m for m in st.session_state.messages[-1:]):
-            curr_parts.append(Image.open(uploaded_file))
+            img_input = Image.open(uploaded_file)
+            curr_parts.append(img_input)
+            # AI에게 명확한 가이드라인 주입
+            curr_parts.append(f"{prompt}\n(시스템 명령: 이 사진의 음식 메뉴와 양을 분석하고, 즉시 'tool_log_diet' 도구를 사용하여 기록해라. 분석 결과만 말하지 말고 반드시 도구를 실행해.)")
+        else:
+            curr_parts.append(prompt)
 
-        # 챗 세션 시작
+        # 챗 실행
         chat = model.start_chat(history=history[:-1])
         response = chat.send_message(curr_parts)
 
-        # 3. 도구(Function) 사용 루프
-        # AI가 도구를 쓰는 동안은 계속 여기서 돕니다.
-        loop_limit = 0
+        # 도구 사용 루프
+        executed_tools = [] # 실행된 도구 기록
+        
         while response.candidates and response.parts and response.parts[0].function_call:
-            
-            loop_limit += 1
-            if loop_limit > 5: break # 무한루프 방지
-
-            # 함수 정보 추출
             fc = response.parts[0].function_call
             fname = fc.name
             fargs = dict(fc.args)
 
-            # 토스트 메시지로 진행상황 보여주기 (중요: 사용자가 멈춘 게 아니란 걸 알게 함)
-            st.toast(f"🤖 자비스가 [{fname}] 기능을 수행 중...", icon="⚙️")
-
-            # 함수 실행
+            # 진행 상황 표시
+            st.toast(f"🤖 자비스가 [{fname}] 수행 중...", icon="⚙️")
+            
             tool_func = locals().get(fname)
             if tool_func:
                 tool_result = tool_func(**fargs)
+                executed_tools.append(tool_result) # 결과 저장
             else:
-                tool_result = "Error: 존재하지 않는 도구입니다."
+                tool_result = "Error: 도구 없음"
             
-            # 결과를 AI에게 반환
             response = chat.send_message(
                 genai.protos.Content(
                     parts=[genai.protos.Part(
@@ -149,20 +160,26 @@ if prompt := st.chat_input("지시를 내려주십시오."):
                 )
             )
 
-        # 4. 최종 답변 출력 (이제 안전하게 텍스트를 꺼냅니다)
+        # 최종 응답 출력
         final_text = ""
         try:
-            final_text = response.text
+            if response.text:
+                final_text = response.text
         except ValueError:
-            # 텍스트가 없으면(여전히 함수 호출이거나 등등) 강제로 내용을 확인
-            final_text = "시스템: 처리 완료되었으나 텍스트 응답이 생성되지 않았습니다."
+            # 텍스트가 없어도 도구가 실행되었다면 성공 메시지 생성
+            if executed_tools:
+                final_text = f"✅ 처리 완료되었습니다.\n\n[실행 결과]\n" + "\n".join(executed_tools)
+            else:
+                final_text = "시스템: 응답을 생성하지 못했습니다. (사진 분석 실패 가능성)"
         
-        if final_text:
-            st.chat_message("assistant").markdown(final_text)
-            st.session_state.messages.append({"role":"model", "content":final_text})
+        # 만약 텍스트가 비었는데 도구는 실행됐다면 강제로 채움
+        if not final_text and executed_tools:
+             final_text = f"✅ 기록을 완료했습니다.\n" + "\n".join(executed_tools)
+
+        st.chat_message("assistant").markdown(final_text)
+        st.session_state.messages.append({"role":"model", "content":final_text})
         
         if uploaded_file: st.rerun()
 
     except Exception as e:
-        # 에러가 나면 숨기지 말고 그대로 보여줌 (그래야 원인을 앎)
-        st.error(f"시스템 처리 중 오류 발생: {e}")
+        st.error(f"오류 발생: {e}")
