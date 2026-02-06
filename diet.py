@@ -1,7 +1,56 @@
-# ... (위쪽 log_diet 함수는 그대로 유지) ...
+import datetime
+import time
+import json
+import google.generativeai as genai
+import streamlit as st
 
 # ==========================================
-# 2. 식단 채점 함수 (디버깅 강화 버전)
+# 1. 식단 기록 함수
+# ==========================================
+def log_diet(db, menu, amount, meal_type):
+    try:
+        try:
+            ws = db.doc.worksheet("식단")
+        except:
+            return "오류: '식단' 시트가 없습니다."
+
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        
+        # 컬럼 매핑 (A=1, B=2, ... )
+        col_map = {
+            "아침": 2, "점심": 3, "간식": 4, "저녁": 5, 
+            "보충제": 6, "운동후보충제": 6
+        }
+        target_col = col_map.get(meal_type, 4) 
+        input_text = f"{menu}({amount})"
+
+        # 오늘 날짜 찾기
+        try:
+            cell = ws.find(today)
+        except:
+            cell = None
+
+        if cell:
+            row_idx = cell.row
+            # 기존 값 가져오기
+            curr_val = ws.cell(row_idx, target_col).value
+            # 이미 값이 있으면 콤마로 연결
+            new_val = f"{curr_val}, {input_text}" if curr_val else input_text
+            ws.update_cell(row_idx, target_col, new_val)
+            return "success"
+        else:
+            # 새로운 행 추가 (Total, Score, Comments 포함 9열)
+            # A, B, C, D, E, F, G(Total), H(Score), I(Comments)
+            new_row = [today, "", "", "", "", "", "", "", ""] 
+            new_row[target_col-1] = input_text
+            ws.append_row(new_row)
+            return "success"
+
+    except Exception as e:
+        return f"에러 발생: {str(e)}"
+
+# ==========================================
+# 2. 식단 채점 함수 (디버깅 모드)
 # ==========================================
 def batch_score(db):
     try:
@@ -29,7 +78,7 @@ def batch_score(db):
 
             # [디버깅] 현재 행의 상태 확인
             date_val = row[0]
-            score_val = row[7]
+            score_val = row[7] # H열 (0부터 시작하므로 7)
             diet_txt = "".join(row[1:6]).strip()
 
             # 1. 이미 점수가 있으면 패스
@@ -73,7 +122,7 @@ def batch_score(db):
                 response = model.generate_content(prompt)
                 raw_text = response.text.strip()
                 
-                # 결과 확인용 로그 (잠시 주석 처리 가능)
+                # 결과 확인용 로그 (필요시 주석 해제)
                 # st.code(raw_text, language='json') 
 
                 clean_text = raw_text.replace("```json", "").replace("```", "").strip()
@@ -83,14 +132,14 @@ def batch_score(db):
                 score_val = data.get("score", "0")
                 comment_val = data.get("comment", "분석 실패")
 
-                ws.update_cell(current_row_num, 7, total_val)
-                ws.update_cell(current_row_num, 8, score_val)
-                ws.update_cell(current_row_num, 9, comment_val)
+                ws.update_cell(current_row_num, 7, total_val) # G열 업데이트
+                ws.update_cell(current_row_num, 8, score_val) # H열 업데이트
+                ws.update_cell(current_row_num, 9, comment_val) # I열 업데이트
                 
                 updated_count += 1
                 st.success(f"✅ [Row {current_row_num}] 채점 완료: {score_val}점")
                 
-                time.sleep(1.5)
+                time.sleep(1.5) # API 제한 방지
 
             except Exception as e:
                 # [핵심] 여기서 에러 내용을 화면에 뿌려줍니다.
