@@ -1,62 +1,70 @@
 import datetime
-import time
-import json
-import google.generativeai as genai
+import gspread
 
-# 식단 기록 함수
 def log_diet(db, menu, amount, meal_type):
+    """
+    사용자 시트 구조에 맞춘 식단 기록 함수
+    순서: 날짜(A) | 아침(B) | 점심(C) | 간식(D) | 저녁(E) | 운동후보충제(F) | Total Input(G) | Score(H) | Comments(I)
+    """
     try:
-        col_map = {"아침": 2, "점심": 3, "간식": 4, "저녁": 5, "보충제": 6}
-        target_col = col_map.get(meal_type, 4)
+        # 1. 시트 연결
+        try:
+            ws = db.doc.worksheet("식단")
+        except:
+            return "오류: '식단' 시트를 찾을 수 없습니다."
+
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         
-        cell = db.find_cell("식단", today)
-        input_txt = f"{menu}({amount})"
+        # 2. 식사 유형별 컬럼 번호 매핑 (알려주신 순서 적용)
+        col_map = {
+            "아침": 2,          # B열
+            "점심": 3,          # C열
+            "간식": 4,          # D열
+            "저녁": 5,          # E열
+            "보충제": 6,        # F열 (운동후보충제)
+            "운동후보충제": 6   # 혹시 몰라 둘 다 매핑
+        }
         
-        if cell:
-            curr = db.get_cell_value("식단", cell.row, target_col)
-            new_val = f"{curr}, {input_txt}" if curr else input_txt
-            db.update_cell("식단", cell.row, target_col, new_val)
-        else:
-            row = [today, "", "", "", "", "", ""]
-            row[target_col-1] = input_txt
-            db.append_row("식단", row)
-        return "success"
-    except Exception as e: return str(e)
+        # AI가 '보충제'라고 하든 '운동후보충제'라고 하든 6번 칸으로 보냄
+        # 매핑 안 된 단어가 오면 기본값 '간식(4)' 처리
+        target_col = col_map.get(meal_type, 4) 
+        
+        input_text = f"{menu}({amount})"
 
-# [핵심] 식단 일괄 채점 함수
-def batch_score(db, model_name="gemini-2.5-flash"):
-    rows = db.get_all_values("식단")
-    # 헤더 인덱스 찾기
-    try:
-        idx_total = rows[0].index("Total")
-        idx_score = rows[0].index("Score")
-        idx_cmt = 8 
-    except: return "식단 시트 헤더 오류"
-
-    updates = []
-    for i, row in enumerate(rows[1:], start=2):
-        has_food = any(len(row)>j and row[j] for j in [1,2,3,4,5])
-        no_score = (len(row) <= idx_score) or (not row[idx_score])
-        if has_food and no_score:
-            updates.append((i, f"아침:{row[1]}, 점심:{row[2]}, 저녁:{row[4]}, 간식:{row[3]}"))
-
-    if not updates: return "채점할 데이터가 없습니다."
-
-    count = 0
-    model = genai.GenerativeModel(model_name)
-    for r_idx, txt in updates:
-        prompt = f"""
-        영양사로서 식단 평가. User: 183cm/82kg (커팅중). 식단: {txt}
-        JSON 응답: {{ "total": "C:.. P:.. F:..", "score": 85, "comment": "존댓말 평가" }}
-        """
+        # 3. 오늘 날짜 행 찾기
         try:
-            res = model.generate_content(prompt)
-            data = json.loads(res.text.strip().replace("```json","").replace("```",""))
-            db.update_cell("식단", r_idx, idx_total+1, data.get("total",""))
-            db.update_cell("식단", r_idx, idx_score+1, data.get("score",0))
-            db.update_cell("식단", r_idx, idx_cmt+1, data.get("comment",""))
-            count += 1
-            time.sleep(1)
-        except: continue
-    return f"✅ {count}일치 식단 채점 완료"
+            cell = ws.find(today)
+        except:
+            cell = None
+
+        if cell:
+            # [수정] 이미 오늘 기록이 있으면 -> 해당 칸에 덧붙이기
+            row_idx = cell.row
+            curr_val = ws.cell(row_idx, target_col).value
+            
+            if curr_val:
+                new_val = f"{curr_val}, {input_text}"
+            else:
+                new_val = input_text
+                
+            ws.update_cell(row_idx, target_col, new_val)
+            return "success"
+        else:
+            # [수정] 오늘 첫 기록이면 -> 새 줄 만들기 (총 9칸 확보)
+            # A(날짜) ~ I(Comments) 까지 빈 칸 생성
+            new_row = [today, "", "", "", "", "", "", "", ""] 
+            
+            # 목표 칸에 내용 넣기
+            new_row[target_col-1] = input_text
+            
+            ws.append_row(new_row)
+            return "success"
+
+    except Exception as e:
+        return f"에러 발생: {str(e)}"
+
+def batch_score(db):
+    """
+    식단 채점 기능 (추후 구현)
+    """
+    return "현재 자동 채점 기능은 준비 중입니다."
