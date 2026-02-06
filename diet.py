@@ -122,7 +122,7 @@ def batch_score(db):
             {{
                 "total": "약 1800kcal (탄:150g, 단:160g, 지:50g)",
                 "score": "85",
-                "comment": "간헐적 단식을 잘 지키셨습니다. 점심의 탄수화물 비중이 적절하며, 저녁 단백질 보충도 훌륭합니다."
+                "comment": "점심의 탄수화물 비중이 적절하며, 저녁 단백질 보충도 훌륭합니다."
             }}
             """
 
@@ -160,4 +160,5 @@ def batch_score(db):
 
     except Exception as e:
         return f"🔥 시스템 오류: {str(e)}"
+
 
